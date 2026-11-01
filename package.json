@@ -1,0 +1,17 @@
+{
+  "name": "iptv-proxy",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local buffering IPTV proxy that keeps the player connected when the provider stream drops.",
+  "type": "module",
+  "bin": {
+    "iptv-proxy": "src/cli.js"
+  },
+  "scripts": {
+    "start": "node src/cli.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
