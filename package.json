@@ -1,11 +1,11 @@
 {
-  "name": "iptv-proxy",
+  "name": "iptv-no-freeze",
   "version": "0.1.0",
   "private": true,
-  "description": "Local buffering IPTV proxy that keeps the player connected when the provider stream drops.",
+  "description": "Local proxy that stops IPTV streams from freezing, dropping out or jumping back. Works with IBO Player and other Xtream Codes or M3U players.",
   "type": "module",
   "bin": {
-    "iptv-proxy": "src/cli.js"
+    "iptv-no-freeze": "src/cli.js"
   },
   "scripts": {
     "start": "node --env-file-if-exists=.env src/cli.js",

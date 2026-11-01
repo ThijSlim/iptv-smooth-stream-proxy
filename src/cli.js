@@ -5,7 +5,7 @@ import { addSecret, debug, setDebug } from './log.js';
 import { createProxyServer } from './server.js';
 import { xtreamFromPlaylistUrl } from './xtream.js';
 
-const HELP = `Usage: iptv-proxy [options]
+const HELP = `Usage: iptv-no-freeze [options]
 
 Provider (use a playlist URL, or Xtream Codes login):
   --playlist <url>      M3U playlist URL                 env IPTV_PLAYLIST
