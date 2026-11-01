@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 import os from 'node:os';
 import { parseArgs } from 'node:util';
+import { addSecret, debug, setDebug } from './log.js';
 import { createProxyServer } from './server.js';
+import { xtreamFromPlaylistUrl } from './xtream.js';
 
 const HELP = `Usage: iptv-proxy [options]
 
@@ -16,6 +18,8 @@ Options:
   --buffer-mb <n>       Buffer per channel in MB (default 4)     env BUFFER_MB
   --user-agent <ua>     User-Agent sent to the provider          env IPTV_USER_AGENT
                         (default: the player's own User-Agent)
+  --debug               Log every player request, upstream call and
+                        per-channel stats (credentials are masked)  env IPTV_DEBUG=1
   -h, --help            Show this help
 
 Prefer environment variables for credentials; command-line arguments are visible to other users via ps.
@@ -37,6 +41,7 @@ try {
       port: { type: 'string' },
       'buffer-mb': { type: 'string' },
       'user-agent': { type: 'string' },
+      debug: { type: 'boolean' },
       help: { type: 'boolean', short: 'h' },
     },
   }));
@@ -50,6 +55,10 @@ if (args.help) {
 }
 
 const option = (name, envName) => args[name] ?? process.env[envName];
+
+setDebug(Boolean(args.debug) || ['1', 'true', 'yes'].includes(process.env.IPTV_DEBUG?.toLowerCase()));
+addSecret(option('username', 'IPTV_USERNAME'));
+addSecret(option('password', 'IPTV_PASSWORD'));
 
 function resolvePlaylistUrl() {
   const direct = option('playlist', 'IPTV_PLAYLIST');
@@ -69,7 +78,9 @@ function resolvePlaylistUrl() {
 const playlistUrl = resolvePlaylistUrl();
 if (!playlistUrl) fail('No provider configured.');
 try {
-  if (!/^https?:$/.test(new URL(playlistUrl).protocol)) throw new Error();
+  const url = new URL(playlistUrl);
+  if (!/^https?:$/.test(url.protocol)) throw new Error();
+  for (const key of ['username', 'password']) addSecret(url.searchParams.get(key));
 } catch {
   fail('The playlist URL must start with http:// or https://');
 }
@@ -81,6 +92,7 @@ if (!(bufferMb > 0 && bufferMb <= 256)) fail('--buffer-mb must be between 0 and 
 
 const proxy = createProxyServer({
   playlistUrl,
+  xtream: xtreamFromPlaylistUrl(playlistUrl),
   userAgent: option('user-agent', 'IPTV_USER_AGENT'),
   bufferBytes: Math.round(bufferMb * 1024 * 1024),
 });
@@ -96,10 +108,14 @@ proxy.server.listen(port, '0.0.0.0', () => {
     .filter((a) => a && a.family === 'IPv4' && !a.internal)
     .map((a) => a.address);
   console.log(`IPTV proxy listening on port ${port}.`);
-  console.log('Use this playlist URL in IBO Player:');
-  for (const address of addresses.length ? addresses : ['localhost']) {
-    console.log(`  http://${address}:${port}/playlist.m3u`);
+  const hosts = addresses.length ? addresses : ['localhost'];
+  console.log('M3U playlist URL for the player:');
+  for (const address of hosts) console.log(`  http://${address}:${port}/playlist.m3u`);
+  if (xtreamFromPlaylistUrl(playlistUrl)) {
+    console.log('Or log in with Xtream Codes, using your normal username and password and this server URL:');
+    for (const address of hosts) console.log(`  http://${address}:${port}`);
   }
+  debug(`debug logging on; provider playlist ${playlistUrl}, buffer ${bufferMb} MB`);
 });
 
 for (const signal of ['SIGINT', 'SIGTERM']) {

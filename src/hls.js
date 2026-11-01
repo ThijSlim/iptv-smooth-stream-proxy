@@ -1,4 +1,5 @@
 import { setTimeout as sleep } from 'node:timers/promises';
+import { debug, errorDetail, tracedFetch } from './log.js';
 
 export function isHlsResponse(res) {
   const type = res.headers.get('content-type') ?? '';
@@ -42,17 +43,15 @@ function parseMediaPlaylist(text, base) {
 // Follows a live HLS playlist and emits the segments as one continuous TS stream.
 export async function runHls({ url, text, signal, userAgent, onData }) {
   const get = async (target) => {
-    const res = await fetch(target, { headers: { 'User-Agent': userAgent }, signal });
-    if (!res.ok) {
-      res.body?.cancel().catch(() => {});
-      throw new Error(`HLS HTTP ${res.status}`);
-    }
+    const res = await tracedFetch(target, { headers: { 'User-Agent': userAgent }, signal });
+    if (!res.ok) throw new Error(`HLS HTTP ${res.status}${await errorDetail(res)}`);
     return res;
   };
 
   let playlistUrl = url;
   if (text.includes('#EXT-X-STREAM-INF')) {
     playlistUrl = pickVariant(text, url);
+    debug(`HLS master playlist, picked variant ${playlistUrl}`);
     text = null;
   }
 
@@ -69,6 +68,7 @@ export async function runHls({ url, text, signal, userAgent, onData }) {
     if (playlist.segments.length && playlist.segments.at(-1).seq < lastSeq) lastSeq = -1;
     let todo = playlist.segments.filter((s) => s.seq > lastSeq);
     if (lastSeq < 0 && !playlist.ended) todo = todo.slice(-3);
+    debug(`HLS playlist: ${playlist.segments.length} segments, ${todo.length} new, target ${playlist.targetDuration}s`);
 
     for (const segment of todo) {
       const res = await get(segment.url);

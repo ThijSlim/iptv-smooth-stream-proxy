@@ -1,5 +1,6 @@
 import { setTimeout as sleep } from 'node:timers/promises';
 import { isHlsResponse, runHls } from './hls.js';
+import { debug, describeError, errorDetail, isDebug, tracedFetch } from './log.js';
 import { NULL_BURST, TsPacketizer } from './ts.js';
 
 const DEFAULTS = {
@@ -10,6 +11,7 @@ const DEFAULTS = {
   idleGraceMs: 10_000,
   maxBackoffMs: 5_000,
   tickMs: 1_000,
+  statsMs: 10_000,
 };
 
 // One upstream connection per channel, shared by every player watching it.
@@ -25,6 +27,8 @@ export class Channel {
   #lastDataAt = 0;
   #timer = null;
   #stopTimer = null;
+  #bytesIn = 0;
+  #statsAt = 0;
 
   constructor({ id, name, url, userAgent, log, onStop, ...opts }) {
     Object.assign(this, { id, name, url, userAgent, log, onStop });
@@ -36,6 +40,7 @@ export class Channel {
     clearTimeout(this.#stopTimer);
     res.writeHead(200, { 'Content-Type': 'video/mp2t', 'Cache-Control': 'no-store' });
     if (this.#backlogBytes) res.write(Buffer.concat(this.#backlog));
+    debug(`[${this.name}] sent ${this.#backlogBytes} buffered bytes to new player`);
     this.clients.add(res);
     res.on('close', () => this.#removeClient(res));
     this.log(`[${this.name}] player connected (${this.clients.size} watching)`);
@@ -83,7 +88,7 @@ export class Channel {
         if (this.#running) this.log(`[${this.name}] upstream closed, reconnecting`);
       } catch (err) {
         if (!this.#running) return;
-        if (!attempt.signal.aborted) this.log(`[${this.name}] upstream error: ${err.message}, reconnecting`);
+        if (!attempt.signal.aborted) this.log(`[${this.name}] upstream error: ${describeError(err)}, reconnecting`);
       }
       if (!this.#running) return;
       failures = Date.now() - this.#attemptStartedAt > 30_000 ? 0 : failures + 1;
@@ -92,12 +97,10 @@ export class Channel {
   }
 
   async #connect(signal) {
-    const res = await fetch(this.url, { headers: { 'User-Agent': this.userAgent }, signal });
-    if (!res.ok) {
-      res.body?.cancel().catch(() => {});
-      throw new Error(`HTTP ${res.status}`);
-    }
+    const res = await tracedFetch(this.url, { headers: { 'User-Agent': this.userAgent }, signal });
+    if (!res.ok) throw new Error(`HTTP ${res.status}${await errorDetail(res)}`);
     if (isHlsResponse(res)) {
+      debug(`[${this.name}] upstream is HLS`);
       const text = await res.text();
       return runHls({ url: res.url, text, signal, userAgent: this.userAgent, onData: (c) => this.#push(c) });
     }
@@ -105,6 +108,7 @@ export class Channel {
   }
 
   #push(chunk) {
+    this.#bytesIn += chunk.byteLength;
     const data = this.#packetizer.push(Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength));
     if (!data) return;
     this.#lastDataAt = Date.now();
@@ -140,6 +144,18 @@ export class Channel {
     }
     // Keep the player's socket busy while the upstream is reconnecting.
     if (quiet >= this.opts.keepaliveMs && this.#packetizer.isTs) this.#broadcast(NULL_BURST);
+
+    if (isDebug() && now - this.#statsAt >= this.opts.statsMs) {
+      const seconds = (now - (this.#statsAt || now)) / 1000 || 1;
+      const format = this.#packetizer.passthrough ? 'not TS, passthrough' : this.#packetizer.isTs ? 'TS' : 'waiting for TS sync';
+      debug(
+        `[${this.name}] ${Math.round((this.#bytesIn * 8) / seconds / 1000)} kbit/s in, ` +
+          `buffer ${Math.round(this.#backlogBytes / 1024)} KB, ${this.clients.size} players, ` +
+          `last data ${Math.round(quiet / 1000)}s ago, ${format}`,
+      );
+      this.#bytesIn = 0;
+      this.#statsAt = now;
+    }
   }
 }
 
@@ -153,6 +169,10 @@ export class ChannelManager {
   attach(stream, userAgent, res) {
     let channel = this.#channels.get(stream.id);
     if (!channel) {
+      // Providers often allow a single connection, so free idle ones before opening another.
+      for (const other of this.#channels.values()) {
+        if (other.clients.size === 0) other.stop('player switched channel');
+      }
       channel = new Channel({
         ...this.opts,
         ...stream,

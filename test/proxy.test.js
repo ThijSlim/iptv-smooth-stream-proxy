@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import http from 'node:http';
 import { test } from 'node:test';
+import { redact } from '../src/log.js';
 import { rewritePlaylist } from '../src/playlist.js';
 import { createProxyServer } from '../src/server.js';
 import { TsPacketizer } from '../src/ts.js';
@@ -39,6 +40,14 @@ test('rewrites live entries and leaves VOD untouched', () => {
   assert.ok(text.includes(`http://10.0.0.2:34400/stream/${stream.id}.ts`));
   assert.ok(text.includes('http://p/movie/u/p/2.mkv'));
   assert.ok(text.startsWith('#EXTM3U url-tvg="http://p/epg.xml"'));
+});
+
+test('masks credentials in logged URLs', () => {
+  assert.equal(
+    redact('http://p:80/get.php?username=bob&password=s3cret&type=m3u_plus'),
+    'http://p:80/get.php?username=***&password=***&type=m3u_plus',
+  );
+  assert.equal(redact('http://p/live/bob/s3cret/1.ts'), 'http://p/live/***/***/1.ts');
 });
 
 test('packetizer finds sync and emits whole packets', () => {
@@ -100,4 +109,48 @@ test('keeps the player connected across upstream drops, for TS and HLS', async (
   const hls = await readBytes(hlsUrl, 188 * 20);
   assert.equal(hls[1], 5);
   assert.equal(hls[188 * 10 + 1], 6);
+});
+
+test('emulates the Xtream Codes API with the real login', async (t) => {
+  const seen = [];
+  const upstream = http.createServer((req, res) => {
+    seen.push(req.url);
+    const url = new URL(req.url, 'http://x');
+    if (url.pathname === '/player_api.php' && !url.searchParams.has('action')) {
+      return res.end(JSON.stringify({ user_info: { auth: 1 }, server_info: { url: 'provider', port: '80' } }));
+    }
+    if (url.pathname === '/player_api.php') return res.end(JSON.stringify([{ stream_id: 7, name: 'News' }]));
+    if (url.pathname === '/live/real/secret/7.ts') return res.end(packets(20, 7));
+    res.writeHead(404).end();
+  });
+  upstream.listen(0, '127.0.0.1');
+  await once(upstream, 'listening');
+  const providerBase = `http://127.0.0.1:${upstream.address().port}`;
+
+  const proxy = createProxyServer({
+    playlistUrl: `${providerBase}/get.php?username=real&password=secret`,
+    xtream: { base: providerBase, username: 'real', password: 'secret' },
+    log: () => {},
+    channel: { maxBackoffMs: 20, tickMs: 50, keepaliveMs: 60_000 },
+  });
+  proxy.server.listen(0, '127.0.0.1');
+  await once(proxy.server, 'listening');
+  t.after(() => {
+    proxy.close();
+    upstream.close();
+    upstream.closeAllConnections();
+  });
+
+  // The player was configured with ".../playlist.m3u" as host, as seen in the field.
+  const proxyBase = `http://127.0.0.1:${proxy.server.address().port}/playlist.m3u`;
+  const login = await (await fetch(`${proxyBase}player_api.php?username=tv&password=tv`)).json();
+  assert.equal(login.server_info.url, '127.0.0.1');
+  assert.equal(login.server_info.port, String(proxy.server.address().port));
+  assert.ok(seen.includes('/player_api.php?username=real&password=secret'));
+
+  const live = await (await fetch(`${proxyBase}player_api.php?username=tv&password=tv&action=get_live_streams`)).json();
+  assert.equal(live[0].name, 'News');
+
+  const data = await readBytes(`${proxyBase}live/tv/tv/7.ts`, 188 * 20);
+  assert.equal(data[1], 7);
 });

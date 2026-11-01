@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { debug, describeError, errorDetail, tracedFetch } from './log.js';
 
 // Movies and series need seeking (Range requests), so they bypass the proxy.
 const VOD = /\.(mp4|mkv|avi|mov|m4v|webm|flv|wmv|mpg|mpeg)$|\/(movie|series)\//i;
@@ -49,14 +50,19 @@ export class PlaylistStore {
   }
 
   async render(baseUrl, userAgent) {
-    return rewritePlaylist(await this.#text(userAgent), baseUrl).text;
+    const { text, streams } = rewritePlaylist(await this.#text(userAgent), baseUrl);
+    debug(`playlist served: ${text.length} bytes, ${streams.size} live channels rewritten to ${baseUrl}`);
+    return text;
   }
 
   async lookup(id, userAgent) {
     if (!this.#streams.has(id) && Date.now() - this.#loadedAt > FORCE_RELOAD_AFTER_MS) {
+      debug(`stream ${id} not in cached playlist, reloading`);
       await this.#text(userAgent, true);
     }
-    return this.#streams.get(id);
+    const stream = this.#streams.get(id);
+    debug(stream ? `stream ${id} => "${stream.name}" ${stream.url}` : `stream ${id} not found in playlist`);
+    return stream;
   }
 
   async #text(userAgent, force = false) {
@@ -68,22 +74,25 @@ export class PlaylistStore {
       await this.#loading;
     } catch (err) {
       if (!this.#raw) throw err;
-      this.log(`playlist refresh failed (${err.message}), using cached copy`);
+      this.log(`playlist refresh failed (${describeError(err)}), using cached copy`);
     }
     return this.#raw;
   }
 
   async #load(userAgent) {
-    const res = await fetch(this.url, {
+    const res = await tracedFetch(this.url, {
       headers: { 'User-Agent': userAgent },
       signal: AbortSignal.timeout(30_000),
     });
-    if (!res.ok) throw new Error(`playlist HTTP ${res.status}`);
+    if (!res.ok) throw new Error(`playlist HTTP ${res.status}${await errorDetail(res)}`);
     const text = await res.text();
-    if (!text.trimStart().startsWith('#EXTM3U')) throw new Error('provider did not return an M3U playlist');
+    if (!text.trimStart().startsWith('#EXTM3U')) {
+      debug(`playlist response starts with: ${JSON.stringify(text.slice(0, 200))}`);
+      throw new Error('provider did not return an M3U playlist');
+    }
     this.#raw = text;
     this.#loadedAt = Date.now();
     this.#streams = rewritePlaylist(text, '').streams;
-    this.log(`playlist loaded: ${this.#streams.size} live channels`);
+    this.log(`playlist loaded: ${this.#streams.size} live channels, ${text.length} bytes`);
   }
 }
