@@ -5,7 +5,48 @@ import { test } from 'node:test';
 import { redact } from '../src/log.js';
 import { rewritePlaylist } from '../src/playlist.js';
 import { createProxyServer } from '../src/server.js';
-import { TsPacketizer } from '../src/ts.js';
+import { TsOverlapFilter, TsPacketizer, pesPts } from '../src/ts.js';
+
+// A video PES start packet (PID 0x100) carrying the given PTS, followed by a continuation packet.
+function videoFrame(pts) {
+  const start = Buffer.alloc(188, 0xff);
+  start.set([0x47, 0x41, 0x00, 0x10, 0, 0, 1, 0xe0, 0, 0, 0x80, 0x80, 5]);
+  start[13] = 0x21 | (Math.floor(pts / 2 ** 30) & 7) << 1;
+  const mid = Math.floor(pts / 2 ** 15) & 0x7fff;
+  start[14] = mid >> 7;
+  start[15] = ((mid & 0x7f) << 1) | 1;
+  const low = pts & 0x7fff;
+  start[16] = low >> 7;
+  start[17] = ((low & 0x7f) << 1) | 1;
+  const next = Buffer.alloc(188, 0xee);
+  next.set([0x47, 0x01, 0x00, 0x10]);
+  return Buffer.concat([start, next]);
+}
+
+const ptsList = (buf) => {
+  const out = [];
+  for (let i = 0; i < buf.length; i += 188) {
+    const pts = pesPts(buf.subarray(i, i + 188));
+    if (pts !== null) out.push(pts);
+  }
+  return out;
+};
+
+test('drops video the player already had after a reconnect', () => {
+  let skipped = 0;
+  const filter = new TsOverlapFilter((bytes) => (skipped = bytes));
+  const frames = (from, to) => Buffer.concat(Array.from({ length: to - from + 1 }, (_, i) => videoFrame((from + i) * 3600)));
+
+  assert.deepEqual(ptsList(filter.filter(frames(1, 10))), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((n) => n * 3600));
+  filter.reconnected();
+  const resumed = filter.filter(frames(4, 14));
+  assert.deepEqual(ptsList(resumed), [11, 12, 13, 14].map((n) => n * 3600));
+  assert.equal(resumed.length, 4 * 2 * 188);
+  assert.equal(skipped, 7 * 2 * 188);
+
+  filter.reconnected();
+  assert.deepEqual(ptsList(filter.filter(frames(9000, 9001))), [9000 * 3600, 9001 * 3600], 'timestamp reset passes');
+});
 
 function packets(count, marker) {
   const buf = Buffer.alloc(188 * count, marker);

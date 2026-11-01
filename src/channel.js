@@ -1,7 +1,7 @@
 import { setTimeout as sleep } from 'node:timers/promises';
 import { isHlsResponse, runHls } from './hls.js';
 import { debug, describeError, errorDetail, isDebug, tracedFetch } from './log.js';
-import { NULL_BURST, TsPacketizer } from './ts.js';
+import { NULL_BURST, TsOverlapFilter, TsPacketizer } from './ts.js';
 
 const DEFAULTS = {
   bufferBytes: 4 * 1024 * 1024,
@@ -21,10 +21,14 @@ export class Channel {
   #backlog = [];
   #backlogBytes = 0;
   #packetizer = new TsPacketizer();
+  #overlap = new TsOverlapFilter((skipped) => {
+    if (skipped) this.log(`[${this.name}] skipped ${Math.round(skipped / 1024)} KB of video the player already had`);
+  });
   #running = false;
   #attempt = null;
   #attemptStartedAt = 0;
   #lastDataAt = 0;
+  #lastOutputAt = 0;
   #timer = null;
   #stopTimer = null;
   #bytesIn = 0;
@@ -85,6 +89,7 @@ export class Channel {
       this.#attempt = attempt;
       this.#attemptStartedAt = Date.now();
       this.#packetizer.reset();
+      this.#overlap.reconnected();
       try {
         await this.#connect(attempt.signal);
         if (this.#running) this.log(`[${this.name}] upstream closed, reconnecting`);
@@ -111,9 +116,12 @@ export class Channel {
 
   #push(chunk) {
     this.#bytesIn += chunk.byteLength;
-    const data = this.#packetizer.push(Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength));
+    let data = this.#packetizer.push(Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength));
     if (!data) return;
     this.#lastDataAt = Date.now();
+    if (this.#packetizer.isTs && !this.#packetizer.passthrough) data = this.#overlap.filter(data);
+    if (!data.length) return;
+    this.#lastOutputAt = this.#lastDataAt;
     this.#backlog.push(data);
     this.#backlogBytes += data.length;
     while (this.#backlog.length > 1 && this.#backlogBytes - this.#backlog[0].length >= this.opts.bufferBytes) {
@@ -145,7 +153,7 @@ export class Channel {
       this.#attempt.abort();
     }
     // Keep the player's socket busy while the upstream is reconnecting.
-    if (quiet >= this.opts.keepaliveMs && this.#packetizer.isTs) this.#broadcast(NULL_BURST);
+    if (now - this.#lastOutputAt >= this.opts.keepaliveMs && this.#packetizer.isTs) this.#broadcast(NULL_BURST);
 
     if (isDebug() && now - this.#statsAt >= this.opts.statsMs) {
       const seconds = (now - (this.#statsAt || now)) / 1000 || 1;
