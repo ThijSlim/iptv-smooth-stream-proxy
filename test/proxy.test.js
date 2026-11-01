@@ -153,4 +153,7 @@ test('emulates the Xtream Codes API with the real login', async (t) => {
 
   const data = await readBytes(`${proxyBase}live/tv/tv/7.ts`, 188 * 20);
   assert.equal(data[1], 7);
+
+  const bare = await readBytes(`${proxyBase}//7`, 188 * 20);
+  assert.equal(bare[1], 7);
 });

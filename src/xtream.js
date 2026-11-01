@@ -5,7 +5,8 @@ import { debug, errorDetail, tracedFetch } from './log.js';
 // Unanchored so a host entered as "http://ip:port/playlist.m3u" in the player still works.
 const API_PATH = /(player_api|xmltv|panel_api)\.php$/;
 const MEDIA_PATH = /(live|movie|series|timeshift)\/[^/]+\/[^/]+\/(.+)$/;
-const SHORT_LIVE_PATH = /^\/[^/]+\/[^/]+\/(\d+(?:\.\w+)?)$/;
+// Xtream short form "/user/pass/123"; IBO Player also sends "//123" with empty segments.
+const SHORT_LIVE_PATH = /\/(\d+(?:\.\w+)?)$/;
 const BUFFERED_LIVE_FILE = /^(\d+)(?:\.ts)?$/;
 
 export function xtreamFromPlaylistUrl(playlistUrl) {

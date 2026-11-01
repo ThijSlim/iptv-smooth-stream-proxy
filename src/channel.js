@@ -38,7 +38,9 @@ export class Channel {
 
   addClient(res) {
     clearTimeout(this.#stopTimer);
-    res.writeHead(200, { 'Content-Type': 'video/mp2t', 'Cache-Control': 'no-store' });
+    // Match Xtream servers: raw body until close. TV players often stall on chunked live TS.
+    res.useChunkedEncodingByDefault = false;
+    res.writeHead(200, { 'Content-Type': 'video/mp2t', 'Cache-Control': 'no-store', Connection: 'close' });
     if (this.#backlogBytes) res.write(Buffer.concat(this.#backlog));
     debug(`[${this.name}] sent ${this.#backlogBytes} buffered bytes to new player`);
     this.clients.add(res);

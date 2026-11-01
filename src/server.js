@@ -46,6 +46,7 @@ export function createProxyServer({ playlistUrl, xtream, userAgent, bufferBytes,
     });
 
     try {
+      res.setHeader('Access-Control-Allow-Origin', '*');
       if (!req.headers.host) return send(res, 400, 'Missing Host header\n');
 
       if (pathname === '/playlist.m3u' || pathname.endsWith('get.php')) {
